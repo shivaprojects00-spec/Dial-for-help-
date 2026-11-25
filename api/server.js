@@ -18,12 +18,15 @@ app.set("trust proxy", 1);
 app.use(helmet());
 app.use(express.json({ limit: "20kb" }));
 
-const allowedOrigins = (process.env.FRONTEND_ORIGINS || "http://localhost:3000")
-  .split(",").map((value) => value.trim()).filter(Boolean);
+const allowedOrigins = new Set([
+  "https://dial-for-help.onrender.com",
+  "http://localhost:3000",
+  ...(process.env.FRONTEND_ORIGINS || "").split(",").map((value) => value.trim()).filter(Boolean)
+]);
 
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
     return callback(new Error("Origin is not allowed by CORS"));
   },
   methods: ["GET", "POST", "PATCH", "OPTIONS"],
