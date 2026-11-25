@@ -8,6 +8,7 @@ const helmet = require("helmet");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
+const nodemailer = require("nodemailer");
 const { rateLimit } = require("express-rate-limit");
 const { z } = require("zod");
 
@@ -28,6 +29,8 @@ app.use(cors({
   methods: ["GET", "POST", "PATCH", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
+
+const contactLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 5, standardHeaders: "draft-7", legacyHeaders: false, message: { error: "Too many messages. Please try again later." } });
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -111,6 +114,8 @@ async function nextPublicId(client, prefix) {
   );
   return `DHP-${prefix}-${String(result.rows[0].last_value).padStart(6, "0")}`;
 }
+
+const contactSchema = z.object({ name: z.string().trim().min(2).max(80), email: z.string().trim().email().max(254), subject: z.string().trim().min(3).max(120), message: z.string().trim().min(10).max(2000) });
 
 const registerSchema = z.object({
   fullName: z.string().trim().min(2).max(80),
@@ -196,6 +201,42 @@ app.get("/health", async (req, res) => {
     return res.status(200).json({ status: "ok", database: dbReady ? "connected" : "initializing" });
   } catch {
     return res.status(503).json({ status: "starting", database: "unavailable" });
+  }
+});
+
+app.get("/api/v1/public-config", (req, res) => {
+  res.json({
+    contactEmail: (process.env.CONTACT_EMAIL || "shivaprojects00@gmail.com").trim(),
+    whatsappNumber: (process.env.WHATSAPP_NUMBER || "6394689228").replace(/[^0-9]/g, "")
+  });
+});
+
+app.post("/api/v1/contact", contactLimiter, async (req, res) => {
+  const parsed = contactSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Please check your contact details and message." });
+  const { SMTP_HOST, SMTP_USER, SMTP_PASS } = process.env;
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
+    return res.status(503).json({ error: "Email delivery is not configured yet. Please contact us on WhatsApp for now." });
+  }
+  const port = Number(process.env.SMTP_PORT || 465);
+  const transporter = nodemailer.createTransport({
+    host: SMTP_HOST, port,
+    secure: process.env.SMTP_SECURE ? process.env.SMTP_SECURE === "true" : port === 465,
+    auth: { user: SMTP_USER, pass: SMTP_PASS }
+  });
+  const { name, email, subject, message } = parsed.data;
+  try {
+    await transporter.sendMail({
+      from: { name: "Dial for Help Website", address: SMTP_USER },
+      to: (process.env.CONTACT_EMAIL || "shivaprojects00@gmail.com").trim(),
+      replyTo: { name, address: email },
+      subject: "[Dial for Help] " + subject,
+      text: "New website contact message\n\nName: " + name + "\nCustomer email: " + email + "\nSubject: " + subject + "\n\nMessage:\n" + message
+    });
+    res.json({ message: "Your message has been sent successfully." });
+  } catch (error) {
+    console.error("Contact email delivery failed:", error.message);
+    res.status(502).json({ error: "We could not send your message right now. Please try WhatsApp instead." });
   }
 });
 
