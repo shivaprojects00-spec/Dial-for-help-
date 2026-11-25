@@ -209,7 +209,7 @@ app.get("/health", async (req, res) => {
 
 app.get("/api/v1/public-config", (req, res) => {
   res.json({
-    contactEmail: (process.env.CONTACT_EMAIL || "shivaprojects00@gmail.com").trim(),
+    contactEmail: "shivaprojects00@gmail.com",
     whatsappNumber: (process.env.WHATSAPP_NUMBER || "6394689228").replace(/[^0-9]/g, "")
   });
 });
@@ -231,7 +231,7 @@ app.post("/api/v1/contact", contactLimiter, async (req, res) => {
   try {
     await transporter.sendMail({
       from: { name: "Dial for Help Website", address: SMTP_USER },
-      to: (process.env.CONTACT_EMAIL || "shivaprojects00@gmail.com").trim(),
+      to: "shivaprojects00@gmail.com",
       replyTo: { name, address: email },
       subject: "[Dial for Help] " + subject,
       text: "New website contact message\n\nName: " + name + "\nCustomer email: " + email + "\nSubject: " + subject + "\n\nMessage:\n" + message
