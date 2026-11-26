@@ -81,3 +81,24 @@ CREATE TABLE IF NOT EXISTS provider_contacts (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS provider_contacts_city_category_idx ON provider_contacts(city, category);
+
+
+-- Durable contact messages and private admin/customer chat history.
+CREATE TABLE IF NOT EXISTS contact_messages (
+  id BIGSERIAL PRIMARY KEY,
+  customer_name TEXT NOT NULL,
+  customer_email TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS contact_messages_created_idx ON contact_messages(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS guest_chat_messages (
+  id BIGSERIAL PRIMARY KEY,
+  guest_request_id BIGINT NOT NULL REFERENCES guest_requests(id) ON DELETE CASCADE,
+  sender_role TEXT NOT NULL CHECK (sender_role IN ('customer','admin')),
+  message TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS guest_chat_messages_thread_idx ON guest_chat_messages(guest_request_id, created_at);
