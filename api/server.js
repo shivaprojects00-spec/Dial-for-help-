@@ -332,10 +332,30 @@ app.post("/api/v1/auth/login", authLimiter, requireDatabase, async (req, res, ne
       [parsed.data.email.toLowerCase()]
     );
     const user = result.rows[0];
-    if (!user || !user.is_active || !(await bcrypt.compare(parsed.data.password, user.password_hash))) {
+    if (!user || !user.is_active || user.role === "admin" || !(await bcrypt.compare(parsed.data.password, user.password_hash))) {
       return res.status(401).json({ error: "Email or password is incorrect." });
     }
     return res.json({ message: "Signed in successfully.", user: userView(user), token: createToken(user) });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+// Separate admin-only sign-in. Admin credentials are never accepted by customer login.
+app.post("/api/v1/admin/login", authLimiter, requireDatabase, async (req, res, next) => {
+  const parsed = loginSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Enter a valid admin email and password." });
+  try {
+    const result = await pool.query(
+      `SELECT id, public_id, full_name, email, phone, password_hash, role, business_name, city, created_at, is_active
+       FROM users WHERE email = $1 AND role = 'admin'`,
+      [parsed.data.email.toLowerCase()]
+    );
+    const user = result.rows[0];
+    if (!user || !user.is_active || !(await bcrypt.compare(parsed.data.password, user.password_hash))) {
+      return res.status(401).json({ error: "Admin email or password is incorrect." });
+    }
+    return res.json({ message: "Admin signed in successfully.", user: userView(user), token: createToken(user) });
   } catch (error) {
     return next(error);
   }
