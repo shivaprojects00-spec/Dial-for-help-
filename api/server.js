@@ -190,14 +190,17 @@ async function initializeDatabase() {
     }
 
     const existing = await pool.query("SELECT id, role FROM users WHERE email = $1", [account.email]);
+    const hash = await bcrypt.hash(account.password, 12);
     if (existing.rowCount) {
-      if (existing.rows[0].role !== "admin") {
-        console.error("Configured admin email already belongs to a non-admin account; it was NOT promoted.");
-      }
+      // A matching email in private Render admin configuration is an explicit owner-authorized
+      // admin assignment. Upgrade that exact account and rotate its password to the private value.
+      await pool.query(
+        "UPDATE users SET role = 'admin', full_name = $2, password_hash = $3, is_active = TRUE WHERE id = $1",
+        [existing.rows[0].id, account.name, hash]
+      );
+      console.log("Configured admin account verified and updated.");
       continue;
     }
-
-    const hash = await bcrypt.hash(account.password, 12);
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
