@@ -545,6 +545,39 @@ app.patch("/api/v1/admin/guest-requests/:publicId", requireDatabase, authenticat
   } catch (error) { return next(error); }
 });
 
+
+app.get("/api/v1/admin/providers", requireDatabase, authenticate, allowRoles("admin"), async (req, res, next) => {
+  try {
+    const result = await pool.query("SELECT id, provider_name, business_name, phone, email, category, city, availability, admin_notes, created_at FROM provider_contacts ORDER BY created_at DESC LIMIT 300");
+    return res.json({ providers: result.rows });
+  } catch (error) { return next(error); }
+});
+
+app.post("/api/v1/admin/providers", requireDatabase, authenticate, allowRoles("admin"), async (req, res, next) => {
+  const schema = z.object({
+    providerName: z.string().trim().min(2).max(100),
+    businessName: z.string().trim().max(120).optional(),
+    phone: z.string().trim().min(8).max(20).regex(/^[0-9+() .-]+$/),
+    email: z.union([z.string().trim().email().max(254), z.literal("")]).optional(),
+    category: z.string().trim().min(2).max(100),
+    city: z.string().trim().min(2).max(80),
+    availability: z.string().trim().max(120).optional(),
+    adminNotes: z.string().trim().max(1000).optional()
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Please check provider details." });
+  const d = parsed.data;
+  try {
+    const result = await pool.query(
+      `INSERT INTO provider_contacts(provider_name,business_name,phone,email,category,city,availability,admin_notes)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+       RETURNING id,provider_name,business_name,phone,email,category,city,availability,admin_notes,created_at`,
+      [d.providerName,d.businessName || null,d.phone,d.email || null,d.category,d.city,d.availability || null,d.adminNotes || null]
+    );
+    return res.status(201).json({ message: "Provider saved in your private directory.", provider: result.rows[0] });
+  } catch (error) { return next(error); }
+});
+
 app.use((req, res) => res.status(404).json({ error: "Endpoint not found." }));
 
 app.use((error, req, res, next) => {
