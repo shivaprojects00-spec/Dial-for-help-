@@ -469,14 +469,15 @@ app.use((error, req, res, next) => {
 
 const port = Number(process.env.PORT) || 10000;
 
-initializeDatabase()
-  .then(() => {
-    app.listen(port, "0.0.0.0", () => console.log(`Dial for Help API listening on port ${port}`));
-  })
-  .catch((error) => {
-    console.error("API startup failed:", error.message);
-    process.exit(1);
+// Start accepting HTTP traffic immediately so Render can detect the open port.
+// Database initialization runs in the background and does not block startup.
+app.listen(port, "0.0.0.0", () => {
+  console.log(`Dial for Help API listening on port ${port}`);
+  initializeDatabase().catch((error) => {
+    dbReady = false;
+    console.error("Database initialization failed:", error.message);
   });
+});
 
 process.on("SIGTERM", async () => {
   if (pool) await pool.end();
