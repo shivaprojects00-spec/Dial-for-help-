@@ -102,3 +102,17 @@ CREATE TABLE IF NOT EXISTS guest_chat_messages (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS guest_chat_messages_thread_idx ON guest_chat_messages(guest_request_id, created_at);
+
+ALTER TABLE guest_requests ADD COLUMN IF NOT EXISTS customer_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS guest_requests_customer_user_idx ON guest_requests(customer_user_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS oauth_accounts (
+ id BIGSERIAL PRIMARY KEY,
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ provider TEXT NOT NULL CHECK (provider IN ('google','facebook')),
+ provider_user_id TEXT NOT NULL,
+ provider_email TEXT,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ UNIQUE(provider,provider_user_id),
+ UNIQUE(user_id,provider)
+);
+CREATE INDEX IF NOT EXISTS oauth_accounts_user_idx ON oauth_accounts(user_id);
