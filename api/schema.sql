@@ -40,3 +40,27 @@ CREATE TABLE IF NOT EXISTS service_requests (
 CREATE INDEX IF NOT EXISTS requests_customer_idx ON service_requests(requester_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS requests_provider_idx ON service_requests(provider_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS requests_status_type_idx ON service_requests(status, request_type, created_at DESC);
+
+
+-- Public customer enquiries are stored separately so customers do not need provider accounts.
+CREATE TABLE IF NOT EXISTS guest_requests (
+  id BIGSERIAL PRIMARY KEY,
+  public_id TEXT UNIQUE NOT NULL,
+  customer_name TEXT NOT NULL,
+  customer_phone TEXT NOT NULL,
+  customer_email TEXT,
+  request_type TEXT NOT NULL CHECK (request_type IN ('service', 'hotel', 'food')),
+  category TEXT NOT NULL,
+  details TEXT NOT NULL,
+  city TEXT NOT NULL,
+  area TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'provider_contacted', 'availability_confirmed', 'booking_confirmed', 'completed', 'cancelled')),
+  admin_notes TEXT,
+  provider_name TEXT,
+  quoted_price TEXT,
+  appointment_time TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS guest_requests_created_idx ON guest_requests(created_at DESC);
+CREATE INDEX IF NOT EXISTS guest_requests_status_idx ON guest_requests(status, created_at DESC);
