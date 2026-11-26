@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const fs = require("fs");
+const crypto = require("crypto");
 const path = require("path");
 const express = require("express");
 const cors = require("cors");
@@ -97,6 +98,12 @@ function authenticate(req, res, next) {
       error: error.status === 503 ? error.message : "Your session is invalid or has expired."
     });
   }
+}
+
+function optionalAuthenticate(req, res, next) {
+  const h=req.headers.authorization||""; const t=h.startsWith("Bearer ")?h.slice(7):""; if(!t)return next();
+  try { const p=jwt.verify(t,requireJwtSecret(),{issuer:"dial-for-help-api",audience:"dial-for-help"}); req.auth={userId:Number(p.sub),role:p.role,publicId:p.publicId}; return next(); }
+  catch { return res.status(401).json({error:"Your session is invalid or has expired."}); }
 }
 
 function allowRoles(...roles) {
@@ -234,6 +241,8 @@ app.get("/health", async (req, res) => {
 app.get("/api/v1/public-config", (req, res) => {
   res.json({
     contactEmail: "shivaprojects00@gmail.com",
+    googleLoginEnabled: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
+    facebookLoginEnabled: Boolean(process.env.FACEBOOK_APP_ID && process.env.FACEBOOK_APP_SECRET),
     whatsappNumber: (process.env.WHATSAPP_NUMBER || "6394689228").replace(/[^0-9]/g, "")
   });
 });
@@ -335,7 +344,7 @@ app.post("/api/v1/auth/login", authLimiter, requireDatabase, async (req, res, ne
       [parsed.data.email.toLowerCase()]
     );
     const user = result.rows[0];
-    if (!user || !user.is_active || user.role === "admin" || !(await bcrypt.compare(parsed.data.password, user.password_hash))) {
+    if (!user || !user.is_active || user.role !== "customer" || !(await bcrypt.compare(parsed.data.password, user.password_hash))) {
       return res.status(401).json({ error: "Email or password is incorrect." });
     }
     return res.json({ message: "Signed in successfully.", user: userView(user), token: createToken(user) });
@@ -521,7 +530,7 @@ const guestRequestSchema = z.object({
   area: z.string().trim().max(100).optional()
 });
 
-app.post("/api/v1/public-requests", guestRequestLimiter, requireDatabase, async (req, res, next) => {
+app.post("/api/v1/public-requests", guestRequestLimiter, requireDatabase, optionalAuthenticate, async (req, res, next) => {
   const parsed = guestRequestSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Please check your details and try again." });
   const data = parsed.data;
@@ -530,10 +539,10 @@ app.post("/api/v1/public-requests", guestRequestLimiter, requireDatabase, async 
     await client.query("BEGIN");
     const publicId = await nextPublicId(client, "G");
     const result = await client.query(
-      `INSERT INTO guest_requests(public_id, customer_name, customer_phone, customer_email, request_type, category, details, city, area)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      `INSERT INTO guest_requests(public_id, customer_name, customer_phone, customer_email, request_type, category, details, city, area, customer_user_id)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        RETURNING public_id, status, created_at`,
-      [publicId, data.name, data.phone, data.email || null, data.requestType, data.category, data.details, data.city, data.area || null]
+      [publicId, data.name, data.phone, data.email || null, data.requestType, data.category, data.details, data.city, data.area || null, req.auth && req.auth.role === "customer" ? req.auth.userId : null]
     );
     await client.query("COMMIT");
     if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
@@ -719,6 +728,55 @@ app.post("/api/v1/admin/chats/:publicId", requireDatabase, authenticate, allowRo
     return res.status(201).json({ message: result.rows[0] });
   } catch (error) { return next(error); }
 });
+
+
+const OAUTH_FRONTEND="https://dial-for-help.onrender.com/customer.html";
+const OAUTH_API="https://dial-for-help-api.onrender.com";
+const OAUTH_COOKIE="dh_oauth_state";
+function cookieValue(req,name){const p=(req.headers.cookie||"").split(";").map(x=>x.trim()).find(x=>x.startsWith(name+"="));return p?decodeURIComponent(p.slice(name.length+1)):"";}
+function setOAuthCookie(res,t){res.setHeader("Set-Cookie",OAUTH_COOKIE+"="+encodeURIComponent(t)+"; HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth; Max-Age=600");}
+function clearOAuthCookie(res){res.setHeader("Set-Cookie",OAUTH_COOKIE+"=; HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth; Max-Age=0");}
+function makeOAuthState(provider,extra={}){const nonce=crypto.randomBytes(24).toString("hex");return {nonce,token:jwt.sign({provider,nonce,...extra},requireJwtSecret(),{expiresIn:"10m",issuer:"dial-for-help-oauth",audience:"dial-for-help-oauth"})};}
+function oauthReady(p){return p==="google"?Boolean(process.env.GOOGLE_CLIENT_ID&&process.env.GOOGLE_CLIENT_SECRET):Boolean(process.env.FACEBOOK_APP_ID&&process.env.FACEBOOK_APP_SECRET);}
+function oauthUrl(p,state){
+ if(p==="google"){const u=new URL("https://accounts.google.com/o/oauth2/v2/auth");u.search=new URLSearchParams({client_id:process.env.GOOGLE_CLIENT_ID,redirect_uri:OAUTH_API+"/api/v1/auth/google/callback",response_type:"code",scope:"openid email profile",state,prompt:"select_account"}).toString();return u.toString();}
+ const u=new URL("https://www.facebook.com/v22.0/dialog/oauth");u.search=new URLSearchParams({client_id:process.env.FACEBOOK_APP_ID,redirect_uri:OAUTH_API+"/api/v1/auth/facebook/callback",response_type:"code",scope:"email,public_profile",state}).toString();return u.toString();
+}
+async function oauthProfile(provider,code){
+ if(provider==="google"){
+  const tr=await fetch("https://oauth2.googleapis.com/token",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({code,client_id:process.env.GOOGLE_CLIENT_ID,client_secret:process.env.GOOGLE_CLIENT_SECRET,redirect_uri:OAUTH_API+"/api/v1/auth/google/callback",grant_type:"authorization_code"})});
+  const tokens=await tr.json();if(!tr.ok||!tokens.id_token)throw new Error("Google sign-in could not be verified.");
+  const vr=await fetch("https://oauth2.googleapis.com/tokeninfo?id_token="+encodeURIComponent(tokens.id_token));const p=await vr.json();
+  if(!vr.ok||p.aud!==process.env.GOOGLE_CLIENT_ID||!["accounts.google.com","https://accounts.google.com"].includes(p.iss)||p.email_verified!=="true"||!p.sub||!p.email)throw new Error("Google account verification failed.");
+  return {id:p.sub,email:p.email.toLowerCase(),name:p.name||p.given_name||"Customer"};
+ }
+ const tu=new URL("https://graph.facebook.com/v22.0/oauth/access_token");tu.search=new URLSearchParams({client_id:process.env.FACEBOOK_APP_ID,client_secret:process.env.FACEBOOK_APP_SECRET,redirect_uri:OAUTH_API+"/api/v1/auth/facebook/callback",code}).toString();
+ const tr=await fetch(tu);const tk=await tr.json();if(!tr.ok||!tk.access_token)throw new Error("Facebook sign-in could not be verified.");
+ const mu=new URL("https://graph.facebook.com/me");mu.search=new URLSearchParams({fields:"id,name,email",access_token:tk.access_token}).toString();const mr=await fetch(mu);const p=await mr.json();
+ if(!mr.ok||!p.id||!p.email)throw new Error("Facebook did not provide an email. Please use email sign-in.");
+ return {id:p.id,email:p.email.toLowerCase(),name:p.name||"Customer"};
+}
+async function saveOAuthCustomer(provider,p){
+ const c=await pool.connect();try{await c.query("BEGIN");
+  const found=await c.query("SELECT u.* FROM oauth_accounts a JOIN users u ON u.id=a.user_id WHERE a.provider=$1 AND a.provider_user_id=$2",[provider,p.id]);
+  if(found.rowCount){const u=found.rows[0];if(u.role!=="customer"||!u.is_active)throw new Error("This account cannot use customer sign-in.");await c.query("COMMIT");return u;}
+  const duplicate=await c.query("SELECT id FROM users WHERE email=$1",[p.email]);if(duplicate.rowCount)throw new Error("An account already uses this email. Sign in with that account first.");
+  const publicId=await nextPublicId(c,"C");const ph=await bcrypt.hash(crypto.randomBytes(48).toString("hex"),12);
+  const ins=await c.query("INSERT INTO users(public_id,full_name,email,phone,password_hash,role) VALUES($1,$2,$3,'Not provided',$4,'customer') RETURNING *",[publicId,p.name,p.email,ph]);
+  await c.query("INSERT INTO oauth_accounts(user_id,provider,provider_user_id,provider_email) VALUES($1,$2,$3,$4)",[ins.rows[0].id,provider,p.id,p.email]);await c.query("COMMIT");return ins.rows[0];
+ }catch(e){await c.query("ROLLBACK");throw e;}finally{c.release();}
+}
+function oauthError(res,msg){clearOAuthCookie(res);return res.redirect(OAUTH_FRONTEND+"?error="+encodeURIComponent(msg));}
+for(const provider of ["google","facebook"]){
+ app.get("/api/v1/auth/"+provider,(req,res)=>{if(!oauthReady(provider))return res.status(503).send("This sign-in option is not configured yet.");try{const s=makeOAuthState(provider);setOAuthCookie(res,s.token);return res.redirect(oauthUrl(provider,s.token));}catch{return res.status(503).send("Authentication is not configured.");}});
+ app.get("/api/v1/auth/"+provider+"/callback",requireDatabase,async(req,res)=>{try{
+  if(req.query.error)return oauthError(res,"Sign-in was cancelled.");const code=String(req.query.code||""),stateRaw=String(req.query.state||""),cookie=cookieValue(req,OAUTH_COOKIE);
+  if(!code||!stateRaw||!cookie||stateRaw!==cookie)return oauthError(res,"Sign-in session expired. Please try again.");
+  const state=jwt.verify(stateRaw,requireJwtSecret(),{issuer:"dial-for-help-oauth",audience:"dial-for-help-oauth"});if(state.provider!==provider||!state.nonce)return oauthError(res,"Sign-in verification failed.");
+  const profile=await oauthProfile(provider,code);const user=await saveOAuthCustomer(provider,profile);clearOAuthCookie(res);return res.redirect(OAUTH_FRONTEND+"#token="+encodeURIComponent(createToken(user)));
+ }catch(e){console.error(provider+" OAuth failed:",e.message);return oauthError(res,e.message||"Sign-in failed.");}});
+}
+app.get("/api/v1/customer/requests",requireDatabase,authenticate,allowRoles("customer"),async(req,res,next)=>{try{const r=await pool.query("SELECT public_id,request_type,category,city,area,status,quoted_price,appointment_time,created_at FROM guest_requests WHERE customer_user_id=$1 ORDER BY created_at DESC LIMIT 100",[req.auth.userId]);return res.json({requests:r.rows});}catch(e){return next(e);}});
 
 app.use((req, res) => res.status(404).json({ error: "Endpoint not found." }));
 
