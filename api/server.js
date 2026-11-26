@@ -217,30 +217,44 @@ app.get("/api/v1/public-config", (req, res) => {
 app.post("/api/v1/contact", contactLimiter, async (req, res) => {
   const parsed = contactSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Please check your contact details and message." });
-  const { SMTP_HOST, SMTP_USER, SMTP_PASS } = process.env;
-  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
-    return res.status(503).json({ error: "Email delivery is not configured yet. Please contact us on WhatsApp for now." });
-  }
-  const port = Number(process.env.SMTP_PORT || 465);
-  const transporter = nodemailer.createTransport({
-    host: SMTP_HOST, port,
-    secure: process.env.SMTP_SECURE ? process.env.SMTP_SECURE === "true" : port === 465,
-    auth: { user: SMTP_USER, pass: SMTP_PASS }
-  });
   const { name, email, subject, message } = parsed.data;
-  try {
-    await transporter.sendMail({
-      from: { name: "Dial for Help Website", address: SMTP_USER },
-      to: "shivaprojects00@gmail.com",
-      replyTo: { name, address: email },
-      subject: "[Dial for Help] " + subject,
-      text: "New website contact message\n\nName: " + name + "\nCustomer email: " + email + "\nSubject: " + subject + "\n\nMessage:\n" + message
-    });
-    res.json({ message: "Your message has been sent successfully." });
-  } catch (error) {
-    console.error("Contact email delivery failed:", error.message);
-    res.status(502).json({ error: "We could not send your message right now. Please try WhatsApp instead." });
+  let saved = false;
+  if (pool && dbReady) {
+    try {
+      await pool.query(
+        "INSERT INTO contact_messages(customer_name,customer_email,subject,message) VALUES($1,$2,$3,$4)",
+        [name,email,subject,message]
+      );
+      saved = true;
+    } catch (error) {
+      console.error("Contact message database save failed:", error.message);
+    }
   }
+  const { SMTP_HOST, SMTP_USER, SMTP_PASS } = process.env;
+  if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
+    const port = Number(process.env.SMTP_PORT || 465);
+    const transporter = nodemailer.createTransport({
+      host: SMTP_HOST, port,
+      secure: process.env.SMTP_SECURE ? process.env.SMTP_SECURE === "true" : port === 465,
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+      connectionTimeout: 8000, greetingTimeout: 8000, socketTimeout: 12000
+    });
+    try {
+      await transporter.sendMail({
+        from: { name: "Dial for Help Website", address: SMTP_USER },
+        to: "shivaprojects00@gmail.com",
+        replyTo: { name, address: email },
+        subject: "[Dial for Help] " + subject,
+        text: "New website contact message\\n\\nName: " + name + "\\nCustomer email: " + email + "\\nSubject: " + subject + "\\n\\nMessage:\\n" + message
+      });
+      return res.status(201).json({ message: "Message sent successfully. Our team will contact you soon." });
+    } catch (error) {
+      console.error("Contact email delivery failed:", error.message);
+      if (saved) return res.status(201).json({ message: "Message received and saved. Email notification is delayed; our team can still read it in the admin panel." });
+    }
+  }
+  if (saved) return res.status(201).json({ message: "Message received and saved. Our team will read it in the admin panel." });
+  return res.status(503).json({ error: "Message was not saved. Please try again or contact us on WhatsApp." });
 });
 
 app.get("/api/v1", (req, res) => {
@@ -575,6 +589,87 @@ app.post("/api/v1/admin/providers", requireDatabase, authenticate, allowRoles("a
       [d.providerName,d.businessName || null,d.phone,d.email || null,d.category,d.city,d.availability || null,d.adminNotes || null]
     );
     return res.status(201).json({ message: "Provider saved in your private directory.", provider: result.rows[0] });
+  } catch (error) { return next(error); }
+});
+
+
+const chatLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: "draft-7", legacyHeaders: false });
+const chatMessageSchema = z.object({
+  requestId: z.string().trim().min(5).max(30),
+  phone: z.string().trim().min(8).max(20),
+  message: z.string().trim().min(1).max(2000).optional()
+});
+
+app.post("/api/v1/public-requests/chat/history", chatLimiter, requireDatabase, async (req, res, next) => {
+  const parsed = chatMessageSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Enter a valid request ID and phone number." });
+  try {
+    const found = await pool.query(
+      `SELECT id FROM guest_requests WHERE public_id=$1 AND regexp_replace(customer_phone,'[^0-9]','','g')=regexp_replace($2,'[^0-9]','','g')`,
+      [parsed.data.requestId, parsed.data.phone]
+    );
+    if (!found.rowCount) return res.status(404).json({ error: "Request ID and phone number do not match." });
+    const messages = await pool.query(
+      "SELECT sender_role,message,created_at FROM guest_chat_messages WHERE guest_request_id=$1 ORDER BY created_at ASC LIMIT 300",
+      [found.rows[0].id]
+    );
+    return res.json({ messages: messages.rows });
+  } catch (error) { return next(error); }
+});
+
+app.post("/api/v1/public-requests/chat/send", chatLimiter, requireDatabase, async (req, res, next) => {
+  const parsed = chatMessageSchema.extend({ message: z.string().trim().min(1).max(2000) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Write a message (maximum 2000 characters)." });
+  try {
+    const found = await pool.query(
+      `SELECT id FROM guest_requests WHERE public_id=$1 AND regexp_replace(customer_phone,'[^0-9]','','g')=regexp_replace($2,'[^0-9]','','g')`,
+      [parsed.data.requestId, parsed.data.phone]
+    );
+    if (!found.rowCount) return res.status(404).json({ error: "Request ID and phone number do not match." });
+    const result = await pool.query(
+      "INSERT INTO guest_chat_messages(guest_request_id,sender_role,message) VALUES($1,'customer',$2) RETURNING sender_role,message,created_at",
+      [found.rows[0].id, parsed.data.message]
+    );
+    return res.status(201).json({ message: result.rows[0] });
+  } catch (error) { return next(error); }
+});
+
+app.get("/api/v1/admin/chats", requireDatabase, authenticate, allowRoles("admin"), async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT g.public_id,g.customer_name,g.customer_phone,g.category,g.city,g.status,
+        COUNT(m.id)::int AS message_count,MAX(m.created_at) AS last_message_at,
+        (SELECT message FROM guest_chat_messages x WHERE x.guest_request_id=g.id ORDER BY x.created_at DESC LIMIT 1) AS last_message
+       FROM guest_requests g JOIN guest_chat_messages m ON m.guest_request_id=g.id
+       GROUP BY g.id ORDER BY MAX(m.created_at) DESC LIMIT 200`
+    );
+    return res.json({ chats: result.rows });
+  } catch (error) { return next(error); }
+});
+
+app.get("/api/v1/admin/chats/:publicId", requireDatabase, authenticate, allowRoles("admin"), async (req, res, next) => {
+  try {
+    const found = await pool.query("SELECT id FROM guest_requests WHERE public_id=$1",[req.params.publicId]);
+    if (!found.rowCount) return res.status(404).json({ error: "Request not found." });
+    const messages = await pool.query(
+      "SELECT sender_role,message,created_at FROM guest_chat_messages WHERE guest_request_id=$1 ORDER BY created_at ASC LIMIT 300",
+      [found.rows[0].id]
+    );
+    return res.json({ messages: messages.rows });
+  } catch (error) { return next(error); }
+});
+
+app.post("/api/v1/admin/chats/:publicId", requireDatabase, authenticate, allowRoles("admin"), async (req, res, next) => {
+  const parsed = z.object({ message: z.string().trim().min(1).max(2000) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Write a message (maximum 2000 characters)." });
+  try {
+    const found = await pool.query("SELECT id FROM guest_requests WHERE public_id=$1",[req.params.publicId]);
+    if (!found.rowCount) return res.status(404).json({ error: "Request not found." });
+    const result = await pool.query(
+      "INSERT INTO guest_chat_messages(guest_request_id,sender_role,message) VALUES($1,'admin',$2) RETURNING sender_role,message,created_at",
+      [found.rows[0].id, parsed.data.message]
+    );
+    return res.status(201).json({ message: result.rows[0] });
   } catch (error) { return next(error); }
 });
 
