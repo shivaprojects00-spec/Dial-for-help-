@@ -634,6 +634,13 @@ app.post("/api/v1/public-requests/chat/send", chatLimiter, requireDatabase, asyn
   } catch (error) { return next(error); }
 });
 
+app.get("/api/v1/admin/contact-messages", requireDatabase, authenticate, allowRoles("admin"), async (req, res, next) => {
+  try {
+    const result = await pool.query("SELECT id,customer_name,customer_email,subject,message,created_at FROM contact_messages ORDER BY created_at DESC LIMIT 300");
+    return res.json({ messages: result.rows });
+  } catch (error) { return next(error); }
+});
+
 app.get("/api/v1/admin/chats", requireDatabase, authenticate, allowRoles("admin"), async (req, res, next) => {
   try {
     const result = await pool.query(
