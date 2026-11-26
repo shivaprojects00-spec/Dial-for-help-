@@ -165,6 +165,7 @@ async function initializeDatabase() {
   const schema = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
   await pool.query(schema);
   dbReady = true;
+  console.log("Database schema initialized; persistent requests, contact inbox and chat are ready.");
 
   // Admin accounts can only be bootstrapped through private Render environment variables.
   // There is intentionally no public admin registration route.
