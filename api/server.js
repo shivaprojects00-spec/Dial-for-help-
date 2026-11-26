@@ -125,7 +125,7 @@ const registerSchema = z.object({
   email: z.string().trim().email().max(254),
   phone: z.string().trim().min(8).max(20).regex(/^[0-9+() .-]+$/),
   password: z.string().min(10).max(72),
-  role: z.enum(["customer", "service_provider", "hotel_partner", "food_partner"]),
+  role: z.literal("customer").default("customer"),
   businessName: z.string().trim().max(120).optional(),
   city: z.string().trim().min(2).max(80).optional()
 });
@@ -167,33 +167,53 @@ async function initializeDatabase() {
   dbReady = true;
   console.log("Database schema initialized; persistent requests, contact inbox and chat are ready.");
 
-  // Admin accounts can only be bootstrapped through private Render environment variables.
-  // There is intentionally no public admin registration route.
-  const adminEmail = (process.env.ADMIN_EMAIL || "").trim().toLowerCase();
-  const adminPassword = process.env.ADMIN_PASSWORD || "";
-  const adminName = (process.env.ADMIN_NAME || "Dial for Help Admin").trim();
+  // Admin accounts are provisioned only from private Render environment variables.
+  // Two admin slots are supported now; no public admin registration endpoint exists.
+  const adminAccounts = [
+    {
+      email: (process.env.ADMIN_EMAIL || "").trim().toLowerCase(),
+      password: process.env.ADMIN_PASSWORD || "",
+      name: (process.env.ADMIN_NAME || "Dial for Help Admin 1").trim()
+    },
+    {
+      email: (process.env.ADMIN2_EMAIL || "").trim().toLowerCase(),
+      password: process.env.ADMIN2_PASSWORD || "",
+      name: (process.env.ADMIN2_NAME || "Dial for Help Admin 2").trim()
+    }
+  ];
 
-  if (adminEmail && adminPassword.length >= 12) {
-    const existing = await pool.query("SELECT id FROM users WHERE email = $1", [adminEmail]);
-    if (existing.rowCount === 0) {
-      const hash = await bcrypt.hash(adminPassword, 12);
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        const publicId = await nextPublicId(client, "A");
-        await client.query(
-          `INSERT INTO users(public_id, full_name, email, phone, password_hash, role)
-           VALUES($1, $2, $3, $4, $5, 'admin')`,
-          [publicId, adminName, adminEmail, "Not provided", hash]
-        );
-        await client.query("COMMIT");
-        console.log("Initial admin account created from server environment configuration.");
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      } finally {
-        client.release();
+  for (const account of adminAccounts) {
+    if (!account.email && !account.password) continue;
+    if (!account.email || account.password.length < 12) {
+      console.error("An admin account was skipped: provide its email and a password of at least 12 characters.");
+      continue;
+    }
+
+    const existing = await pool.query("SELECT id, role FROM users WHERE email = $1", [account.email]);
+    if (existing.rowCount) {
+      if (existing.rows[0].role !== "admin") {
+        console.error("Configured admin email already belongs to a non-admin account; it was NOT promoted.");
       }
+      continue;
+    }
+
+    const hash = await bcrypt.hash(account.password, 12);
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const publicId = await nextPublicId(client, "A");
+      await client.query(
+        `INSERT INTO users(public_id, full_name, email, phone, password_hash, role)
+         VALUES($1, $2, $3, $4, $5, 'admin')`,
+        [publicId, account.name, account.email, "Not provided", hash]
+      );
+      await client.query("COMMIT");
+      console.log("A private admin account was provisioned from server environment configuration.");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
     }
   }
 }
@@ -269,13 +289,9 @@ app.post("/api/v1/auth/register", authLimiter, requireDatabase, async (req, res,
   }
 
   const data = parsed.data;
-  if (["service_provider", "hotel_partner", "food_partner"].includes(data.role) &&
-      (!data.businessName || !data.city)) {
-    return res.status(400).json({ error: "Partner registration requires a business name and city." });
-  }
-
+  // Public registration is customer-only. Provider and admin accounts are never self-created.
   const email = data.email.toLowerCase();
-  const prefix = { customer: "C", service_provider: "S", hotel_partner: "H", food_partner: "F" }[data.role];
+  const prefix = "C";
   const client = await pool.connect();
 
   try {
