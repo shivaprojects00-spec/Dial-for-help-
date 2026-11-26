@@ -64,3 +64,20 @@ CREATE TABLE IF NOT EXISTS guest_requests (
 );
 CREATE INDEX IF NOT EXISTS guest_requests_created_idx ON guest_requests(created_at DESC);
 CREATE INDEX IF NOT EXISTS guest_requests_status_idx ON guest_requests(status, created_at DESC);
+
+
+-- Admin-managed provider directory. Customer-facing APIs never expose this table.
+CREATE TABLE IF NOT EXISTS provider_contacts (
+  id BIGSERIAL PRIMARY KEY,
+  provider_name TEXT NOT NULL,
+  business_name TEXT,
+  phone TEXT NOT NULL,
+  email TEXT,
+  category TEXT NOT NULL,
+  city TEXT NOT NULL,
+  availability TEXT,
+  admin_notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS provider_contacts_city_category_idx ON provider_contacts(city, category);
