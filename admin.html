@@ -53,6 +53,8 @@ function renderContactInbox(messages){
  if(!messages.length){root.textContent='No website contact messages yet.';return;}
  messages.forEach(m=>{const box=document.createElement('article');box.className='req';const h=document.createElement('h3');h.textContent=m.subject+' · '+m.customer_name;const meta=document.createElement('p');meta.className='muted';meta.textContent=m.customer_email+' · '+new Date(m.created_at).toLocaleString();const body=document.createElement('p');body.style.whiteSpace='pre-wrap';body.textContent=m.message;box.append(h,meta,body);root.append(box);});
 }
-\nsetInterval(()=>{if(token){api('/api/v1/admin/chats').then(d=>renderChatList(d.chats||[])).catch(()=>{});if(activeChat)api('/api/v1/admin/chats/'+encodeURIComponent(activeChat)).then(d=>renderAdminChat(d.messages||[])).catch(()=>{});}},12000);\n$('providerForm').addEventListener('submit',async e=>{e.preventDefault();const form=e.currentTarget,msg=$('providerMsg');msg.textContent='Saving…';try{const payload=Object.fromEntries(new FormData(form).entries());const d=await api('/api/v1/admin/providers',{method:'POST',body:JSON.stringify(payload)});msg.textContent=d.message;form.reset();await loadAll();}catch(err){msg.textContent=err.message;}});
+
+setInterval(()=>{if(token){api('/api/v1/admin/chats').then(d=>renderChatList(d.chats||[])).catch(()=>{});if(activeChat)api('/api/v1/admin/chats/'+encodeURIComponent(activeChat)).then(d=>renderAdminChat(d.messages||[])).catch(()=>{});}},12000);
+$('providerForm').addEventListener('submit',async e=>{e.preventDefault();const form=e.currentTarget,msg=$('providerMsg');msg.textContent='Saving…';try{const payload=Object.fromEntries(new FormData(form).entries());const d=await api('/api/v1/admin/providers',{method:'POST',body:JSON.stringify(payload)});msg.textContent=d.message;form.reset();await loadAll();}catch(err){msg.textContent=err.message;}});
 showApp();
 </script></body></html>
