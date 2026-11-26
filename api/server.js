@@ -454,6 +454,97 @@ app.get("/api/v1/admin/requests", requireDatabase, authenticate, allowRoles("adm
   }
 });
 
+
+const guestRequestLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 6, standardHeaders: "draft-7", legacyHeaders: false, message: { error: "Too many requests. Please try again later." } });
+const guestRequestSchema = z.object({
+  name: z.string().trim().min(2).max(80),
+  phone: z.string().trim().min(8).max(20).regex(/^[0-9+() .-]+$/),
+  email: z.union([z.string().trim().email().max(254), z.literal("")]).optional(),
+  requestType: z.enum(["service", "hotel", "food"]),
+  category: z.string().trim().min(2).max(80),
+  details: z.string().trim().min(5).max(1200),
+  city: z.string().trim().min(2).max(80),
+  area: z.string().trim().max(100).optional()
+});
+
+app.post("/api/v1/public-requests", guestRequestLimiter, requireDatabase, async (req, res, next) => {
+  const parsed = guestRequestSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Please check your details and try again." });
+  const data = parsed.data;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const publicId = await nextPublicId(client, "G");
+    const result = await client.query(
+      `INSERT INTO guest_requests(public_id, customer_name, customer_phone, customer_email, request_type, category, details, city, area)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       RETURNING public_id, status, created_at`,
+      [publicId, data.name, data.phone, data.email || null, data.requestType, data.category, data.details, data.city, data.area || null]
+    );
+    await client.query("COMMIT");
+    if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+      const port = Number(process.env.SMTP_PORT || 465);
+      const transporter = nodemailer.createTransport({ host: process.env.SMTP_HOST, port, secure: process.env.SMTP_SECURE ? process.env.SMTP_SECURE === "true" : port === 465, auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } });
+      transporter.sendMail({
+        from: { name: "Dial for Help Website", address: process.env.SMTP_USER },
+        to: "shivaprojects00@gmail.com",
+        subject: "[Dial for Help] New customer request " + publicId,
+        text: "A new customer request has arrived.\n\nRequest: " + publicId + "\nName: " + data.name + "\nPhone: " + data.phone + "\nEmail: " + (data.email || "Not provided") + "\nType: " + data.requestType + "\nCategory: " + data.category + "\nLocation: " + data.area + ", " + data.city + "\nDetails: " + data.details + "\n\nPlease contact the provider yourself and update the admin dashboard."
+      }).catch(error => console.error("New request email failed:", error.message));
+    }
+    return res.status(201).json({ message: "Request received. Dial for Help will contact you after checking availability.", request: result.rows[0] });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    return next(error);
+  } finally {
+    client.release();
+  }
+});
+
+app.post("/api/v1/public-requests/track", guestRequestLimiter, requireDatabase, async (req, res, next) => {
+  const schema = z.object({ requestId: z.string().trim().min(5).max(30), phone: z.string().trim().min(8).max(20) });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Enter your request ID and phone number." });
+  try {
+    const result = await pool.query(
+      `SELECT public_id, request_type, category, city, area, status, quoted_price, appointment_time, created_at, updated_at
+       FROM guest_requests WHERE public_id = $1 AND regexp_replace(customer_phone, '[^0-9]', '', 'g') = regexp_replace($2, '[^0-9]', '', 'g')`,
+      [parsed.data.requestId, parsed.data.phone]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: "No matching request was found." });
+    return res.json({ request: result.rows[0] });
+  } catch (error) { return next(error); }
+});
+
+app.get("/api/v1/admin/guest-requests", requireDatabase, authenticate, allowRoles("admin"), async (req, res, next) => {
+  try {
+    const result = await pool.query("SELECT * FROM guest_requests ORDER BY created_at DESC LIMIT 300");
+    return res.json({ requests: result.rows });
+  } catch (error) { return next(error); }
+});
+
+app.patch("/api/v1/admin/guest-requests/:publicId", requireDatabase, authenticate, allowRoles("admin"), async (req, res, next) => {
+  const schema = z.object({
+    status: z.enum(["pending", "provider_contacted", "availability_confirmed", "booking_confirmed", "completed", "cancelled"]),
+    adminNotes: z.string().trim().max(1500).optional(),
+    providerName: z.string().trim().max(120).optional(),
+    quotedPrice: z.string().trim().max(80).optional(),
+    appointmentTime: z.string().trim().max(120).optional()
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid booking update." });
+  try {
+    const d = parsed.data;
+    const result = await pool.query(
+      `UPDATE guest_requests SET status=$1, admin_notes=$2, provider_name=$3, quoted_price=$4, appointment_time=$5, updated_at=NOW()
+       WHERE public_id=$6 RETURNING public_id,status,updated_at`,
+      [d.status, d.adminNotes || null, d.providerName || null, d.quotedPrice || null, d.appointmentTime || null, req.params.publicId]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: "Request not found." });
+    return res.json({ message: "Request updated.", request: result.rows[0] });
+  } catch (error) { return next(error); }
+});
+
 app.use((req, res) => res.status(404).json({ error: "Endpoint not found." }));
 
 app.use((error, req, res, next) => {
