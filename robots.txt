@@ -1,6 +1,4 @@
 User-agent: *
 Allow: /
-Disallow: /admin.html
-Disallow: /customer.html
 
 Sitemap: https://dial-for-help.onrender.com/sitemap.xml
